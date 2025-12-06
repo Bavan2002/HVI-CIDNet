@@ -123,14 +123,71 @@ def train(epoch):
 
 
 def checkpoint(epoch):
+    """Save full training state including model, optimizer, scheduler, and history."""
     if not os.path.exists("./weights"):
         os.mkdir("./weights")
     if not os.path.exists("./weights/train"):
         os.mkdir("./weights/train")
+
+    # Save model weights only (for inference compatibility)
     model_out_path = "./weights/train/epoch_{}.pth".format(epoch)
     torch.save(model.state_dict(), model_out_path)
+
+    # Save full checkpoint (for resuming training)
+    full_checkpoint_path = "./weights/train/checkpoint_epoch_{}.pth".format(epoch)
+    torch.save(
+        {
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            # Loss history
+            "epoch_list": epoch_list,
+            "rgb_losses": rgb_losses,
+            "hvi_losses": hvi_losses,
+            "total_losses": total_losses,
+            "learning_rates": learning_rates,
+            # Metrics history
+            "metrics_epochs": metrics_epochs,
+            "psnr_list": psnr_list,
+            "ssim_list": ssim_list,
+            "lpips_list": lpips_list,
+        },
+        full_checkpoint_path,
+    )
+
     print("Checkpoint saved to {}".format(model_out_path))
+    print("Full checkpoint saved to {}".format(full_checkpoint_path))
     return model_out_path
+
+
+def load_checkpoint(model, optimizer, scheduler, checkpoint_path):
+    """Load full training state from checkpoint."""
+    global epoch_list, rgb_losses, hvi_losses, total_losses, learning_rates
+    global metrics_epochs, psnr_list, ssim_list, lpips_list
+
+    print("Loading checkpoint from {}".format(checkpoint_path))
+    checkpoint = torch.load(checkpoint_path, map_location=lambda storage, loc: storage)
+
+    model.load_state_dict(checkpoint["model_state_dict"])
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+
+    # Restore loss history
+    epoch_list = checkpoint["epoch_list"]
+    rgb_losses = checkpoint["rgb_losses"]
+    hvi_losses = checkpoint["hvi_losses"]
+    total_losses = checkpoint["total_losses"]
+    learning_rates = checkpoint["learning_rates"]
+
+    # Restore metrics history
+    metrics_epochs = checkpoint["metrics_epochs"]
+    psnr_list = checkpoint["psnr_list"]
+    ssim_list = checkpoint["ssim_list"]
+    lpips_list = checkpoint["lpips_list"]
+
+    print("Checkpoint loaded. Resuming from epoch {}".format(checkpoint["epoch"]))
+    return checkpoint["epoch"]
 
 
 def plot_loss(
@@ -337,11 +394,6 @@ def load_datasets():
 def build_model():
     print("===> Building model ")
     model = CIDNet().cuda()
-    if opt.start_epoch > 0:
-        pth = f"./weights/train/epoch_{opt.start_epoch}.pth"
-        model.load_state_dict(
-            torch.load(pth, map_location=lambda storage, loc: storage)
-        )
     return model
 
 
@@ -431,8 +483,28 @@ if __name__ == "__main__":
     ssim = []
     lpips = []
     start_epoch = 0
+
+    # Load full checkpoint if resuming training
     if opt.start_epoch > 0:
-        start_epoch = opt.start_epoch
+        checkpoint_path = f"./weights/train/checkpoint_epoch_{opt.start_epoch}.pth"
+        if os.path.exists(checkpoint_path):
+            start_epoch = load_checkpoint(model, optimizer, scheduler, checkpoint_path)
+            # Restore psnr/ssim/lpips lists from metrics history
+            psnr = psnr_list.copy()
+            ssim = ssim_list.copy()
+            lpips = lpips_list.copy()
+        else:
+            # Fallback to loading model weights only (old checkpoint format)
+            print("Full checkpoint not found, loading model weights only...")
+            pth = f"./weights/train/epoch_{opt.start_epoch}.pth"
+            model.load_state_dict(
+                torch.load(pth, map_location=lambda storage, loc: storage)
+            )
+            start_epoch = opt.start_epoch
+            print(
+                "Warning: Optimizer/scheduler states not restored. LR schedule may differ."
+            )
+
     if not os.path.exists(opt.val_folder):
         os.mkdir(opt.val_folder)
 
