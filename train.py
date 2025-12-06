@@ -5,6 +5,9 @@ from torchvision import transforms
 import torch.optim as optim
 import torch.backends.cudnn as cudnn
 import numpy as np
+import matplotlib
+
+matplotlib.use("Agg")  # Use non-interactive backend (fixes Colab/server issues)
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 from net.CIDNet import CIDNet
