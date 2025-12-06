@@ -430,7 +430,7 @@ def make_scheduler():
         if opt.start_warmup:
             scheduler_step = CosineAnnealingRestartLR(
                 optimizer=optimizer,
-                periods=[opt.nEpochs - opt.warmup_epochs - opt.start_epoch],
+                periods=[opt.nEpochs - opt.warmup_epochs],
                 restart_weights=[1],
                 eta_min=1e-7,
             )
@@ -443,7 +443,7 @@ def make_scheduler():
         else:
             scheduler = CosineAnnealingRestartLR(
                 optimizer=optimizer,
-                periods=[opt.nEpochs - opt.start_epoch],
+                periods=[opt.nEpochs],
                 restart_weights=[1],
                 eta_min=1e-7,
             )
@@ -504,14 +504,18 @@ if __name__ == "__main__":
                 torch.load(pth, map_location=lambda storage, loc: storage)
             )
             start_epoch = opt.start_epoch
+            # Advance scheduler to match the epoch we're resuming from
+            print(f"Advancing scheduler to epoch {start_epoch}...")
+            for _ in range(start_epoch):
+                scheduler.step()
             print(
-                "Warning: Optimizer/scheduler states not restored. LR schedule may differ."
+                f"Scheduler advanced. Current LR: {optimizer.param_groups[0]['lr']:.6e}"
             )
 
     if not os.path.exists(opt.val_folder):
         os.mkdir(opt.val_folder)
 
-    for epoch in range(start_epoch + 1, opt.nEpochs + start_epoch + 1):
+    for epoch in range(start_epoch + 1, opt.nEpochs + 1):
         epoch_loss, epoch_rgb_loss, epoch_hvi_loss, pic_num = train(epoch)
         scheduler.step()
 
