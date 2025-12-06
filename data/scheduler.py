@@ -2,8 +2,9 @@ from torch.optim.lr_scheduler import _LRScheduler
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import math
 
+
 class GradualWarmupScheduler(_LRScheduler):
-    """ Gradually warm-up(increasing) learning rate in optimizer.
+    """Gradually warm-up(increasing) learning rate in optimizer.
     Proposed in 'Accurate, Large Minibatch SGD: Training ImageNet in 1 Hour'.
 
     Args:
@@ -15,8 +16,8 @@ class GradualWarmupScheduler(_LRScheduler):
 
     def __init__(self, optimizer, multiplier, total_epoch, after_scheduler=None):
         self.multiplier = multiplier
-        if self.multiplier < 1.:
-            raise ValueError('multiplier should be greater thant or equal to 1.')
+        if self.multiplier < 1.0:
+            raise ValueError("multiplier should be greater thant or equal to 1.")
         self.total_epoch = total_epoch
         self.after_scheduler = after_scheduler
         self.finished = False
@@ -26,24 +27,39 @@ class GradualWarmupScheduler(_LRScheduler):
         if self.last_epoch > self.total_epoch:
             if self.after_scheduler:
                 if not self.finished:
-                    self.after_scheduler.base_lrs = [base_lr * self.multiplier for base_lr in self.base_lrs]
+                    self.after_scheduler.base_lrs = [
+                        base_lr * self.multiplier for base_lr in self.base_lrs
+                    ]
                     self.finished = True
                 return self.after_scheduler.get_lr()
             return [base_lr * self.multiplier for base_lr in self.base_lrs]
 
         if self.multiplier == 1.0:
-            return [base_lr * (float(self.last_epoch) / self.total_epoch) for base_lr in self.base_lrs]
+            return [
+                base_lr * (float(self.last_epoch) / self.total_epoch)
+                for base_lr in self.base_lrs
+            ]
         else:
-            return [base_lr * ((self.multiplier - 1.) * self.last_epoch / self.total_epoch + 1.) for base_lr in self.base_lrs]
+            return [
+                base_lr
+                * ((self.multiplier - 1.0) * self.last_epoch / self.total_epoch + 1.0)
+                for base_lr in self.base_lrs
+            ]
 
     def step_ReduceLROnPlateau(self, metrics, epoch=None):
         if epoch is None:
             epoch = self.last_epoch + 1
-        self.last_epoch = epoch if epoch != 0 else 1  # ReduceLROnPlateau is called at the end of epoch, whereas others are called at beginning
+        self.last_epoch = (
+            epoch if epoch != 0 else 1
+        )  # ReduceLROnPlateau is called at the end of epoch, whereas others are called at beginning
         if self.last_epoch <= self.total_epoch:
-            warmup_lr = [base_lr * ((self.multiplier - 1.) * self.last_epoch / self.total_epoch + 1.) for base_lr in self.base_lrs]
+            warmup_lr = [
+                base_lr
+                * ((self.multiplier - 1.0) * self.last_epoch / self.total_epoch + 1.0)
+                for base_lr in self.base_lrs
+            ]
             for param_group, lr in zip(self.optimizer.param_groups, warmup_lr):
-                param_group['lr'] = lr
+                param_group["lr"] = lr
         else:
             if epoch is None:
                 self.after_scheduler.step(metrics, None)
@@ -61,7 +77,29 @@ class GradualWarmupScheduler(_LRScheduler):
                 return super(GradualWarmupScheduler, self).step(epoch)
         else:
             self.step_ReduceLROnPlateau(metrics, epoch)
-            
+
+    def state_dict(self):
+        """Return state dict that properly handles nested after_scheduler."""
+        state = {
+            key: value
+            for key, value in self.__dict__.items()
+            if key not in ("optimizer", "after_scheduler")
+        }
+        if self.after_scheduler is not None:
+            state["after_scheduler_state"] = self.after_scheduler.state_dict()
+        return state
+
+    def load_state_dict(self, state_dict):
+        """Load state dict and restore after_scheduler state properly."""
+        after_scheduler_state = state_dict.pop("after_scheduler_state", None)
+        self.__dict__.update(state_dict)
+        if after_scheduler_state is not None and self.after_scheduler is not None:
+            self.after_scheduler.load_state_dict(after_scheduler_state)
+        # Apply the restored LR to the optimizer
+        for param_group, lr in zip(self.optimizer.param_groups, self.get_lr()):
+            param_group["lr"] = lr
+
+
 def get_position_from_periods(iteration, cumulative_period):
     """Get the position from a period list.
 
@@ -81,9 +119,10 @@ def get_position_from_periods(iteration, cumulative_period):
     for i, period in enumerate(cumulative_period):
         if iteration <= period:
             return i
-        
+
+
 class CosineAnnealingRestartCyclicLR(_LRScheduler):
-    """ Cosine annealing with restarts learning rate scheme.
+    """Cosine annealing with restarts learning rate scheme.
     An example of config:
     periods = [10, 10, 10, 10]
     restart_weights = [1, 0.5, 0.5, 0.5]
@@ -99,39 +138,44 @@ class CosineAnnealingRestartCyclicLR(_LRScheduler):
         last_epoch (int): Used in _LRScheduler. Default: -1.
     """
 
-    def __init__(self,
-                 optimizer,
-                 periods,
-                 restart_weights=(1, ),
-                 eta_mins=(0, ),
-                 last_epoch=-1):
+    def __init__(
+        self, optimizer, periods, restart_weights=(1,), eta_mins=(0,), last_epoch=-1
+    ):
         self.periods = periods
         self.restart_weights = restart_weights
         self.eta_mins = eta_mins
-        assert (len(self.periods) == len(self.restart_weights)
-                ), 'periods and restart_weights should have the same length.'
+        assert len(self.periods) == len(self.restart_weights), (
+            "periods and restart_weights should have the same length."
+        )
         self.cumulative_period = [
-            sum(self.periods[0:i + 1]) for i in range(0, len(self.periods))
+            sum(self.periods[0 : i + 1]) for i in range(0, len(self.periods))
         ]
         super(CosineAnnealingRestartCyclicLR, self).__init__(optimizer, last_epoch)
-        
+
     def get_lr(self):
-        idx = get_position_from_periods(self.last_epoch,
-                                        self.cumulative_period)
+        idx = get_position_from_periods(self.last_epoch, self.cumulative_period)
         current_weight = self.restart_weights[idx]
         nearest_restart = 0 if idx == 0 else self.cumulative_period[idx - 1]
         current_period = self.periods[idx]
         eta_min = self.eta_mins[idx]
 
         return [
-            eta_min + current_weight * 0.5 * (base_lr - eta_min) *
-            (1 + math.cos(math.pi * (
-                (self.last_epoch - nearest_restart) / current_period)))
+            eta_min
+            + current_weight
+            * 0.5
+            * (base_lr - eta_min)
+            * (
+                1
+                + math.cos(
+                    math.pi * ((self.last_epoch - nearest_restart) / current_period)
+                )
+            )
             for base_lr in self.base_lrs
         ]
 
+
 class CosineAnnealingRestartLR(_LRScheduler):
-    """ Cosine annealing with restarts learning rate scheme.
+    """Cosine annealing with restarts learning rate scheme.
 
     An example of config:
     periods = [10, 10, 10, 10]
@@ -150,13 +194,18 @@ class CosineAnnealingRestartLR(_LRScheduler):
         last_epoch (int): Used in _LRScheduler. Default: -1.
     """
 
-    def __init__(self, optimizer, periods, restart_weights=(1, ), eta_min=0, last_epoch=-1):
+    def __init__(
+        self, optimizer, periods, restart_weights=(1,), eta_min=0, last_epoch=-1
+    ):
         self.periods = periods
         self.restart_weights = restart_weights
         self.eta_min = eta_min
-        assert (len(self.periods) == len(
-            self.restart_weights)), 'periods and restart_weights should have the same length.'
-        self.cumulative_period = [sum(self.periods[0:i + 1]) for i in range(0, len(self.periods))]
+        assert len(self.periods) == len(self.restart_weights), (
+            "periods and restart_weights should have the same length."
+        )
+        self.cumulative_period = [
+            sum(self.periods[0 : i + 1]) for i in range(0, len(self.periods))
+        ]
         super(CosineAnnealingRestartLR, self).__init__(optimizer, last_epoch)
 
     def get_lr(self):
@@ -166,7 +215,15 @@ class CosineAnnealingRestartLR(_LRScheduler):
         current_period = self.periods[idx]
 
         return [
-            self.eta_min + current_weight * 0.5 * (base_lr - self.eta_min) *
-            (1 + math.cos(math.pi * ((self.last_epoch - nearest_restart) / current_period)))
+            self.eta_min
+            + current_weight
+            * 0.5
+            * (base_lr - self.eta_min)
+            * (
+                1
+                + math.cos(
+                    math.pi * ((self.last_epoch - nearest_restart) / current_period)
+                )
+            )
             for base_lr in self.base_lrs
         ]
