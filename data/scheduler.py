@@ -90,11 +90,26 @@ class GradualWarmupScheduler(_LRScheduler):
         return state
 
     def load_state_dict(self, state_dict):
-        """Load state dict and restore after_scheduler state properly."""
+        """Load state dict and restore after_scheduler state properly.
+
+        Handles both old format (after_scheduler object) and new format (after_scheduler_state dict).
+        """
+        # Handle NEW format: after_scheduler_state dict
         after_scheduler_state = state_dict.pop("after_scheduler_state", None)
+
+        # Handle OLD format: after_scheduler object (from old checkpoints)
+        old_after_scheduler = state_dict.pop("after_scheduler", None)
+
+        # Update our state (excluding after_scheduler which we handle separately)
         self.__dict__.update(state_dict)
+
         if after_scheduler_state is not None and self.after_scheduler is not None:
+            # NEW format: load state dict into our after_scheduler
             self.after_scheduler.load_state_dict(after_scheduler_state)
+        elif old_after_scheduler is not None and self.after_scheduler is not None:
+            # OLD format: extract state from the old object and apply to our scheduler
+            self.after_scheduler.load_state_dict(old_after_scheduler.state_dict())
+
         # Apply the restored LR to the optimizer
         for param_group, lr in zip(self.optimizer.param_groups, self.get_lr()):
             param_group["lr"] = lr
