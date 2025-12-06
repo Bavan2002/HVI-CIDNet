@@ -17,9 +17,17 @@ from data.scheduler import *
 from tqdm import tqdm
 from datetime import datetime
 
-# Loss tracking
-train_losses = []
+# Loss and LR tracking
 epoch_list = []
+rgb_losses = []
+hvi_losses = []
+total_losses = []
+learning_rates = []
+# Metrics tracking (for epochs with validation)
+metrics_epochs = []
+psnr_list = []
+ssim_list = []
+lpips_list = []
 
 opt = option().parse_args()
 
@@ -46,6 +54,8 @@ def train_init():
 def train(epoch):
     model.train()
     loss_print = 0
+    loss_rgb_print = 0
+    loss_hvi_print = 0
     pic_cnt = 0
     loss_last_10 = 0
     pic_last_10 = 0
@@ -90,6 +100,8 @@ def train(epoch):
         optimizer.step()
 
         loss_print = loss_print + loss.item()
+        loss_rgb_print = loss_rgb_print + loss_rgb.item()
+        loss_hvi_print = loss_hvi_print + loss_hvi.item()
         loss_last_10 = loss_last_10 + loss.item()
         pic_cnt += 1
         pic_last_10 += 1
@@ -107,7 +119,7 @@ def train(epoch):
                 os.mkdir(opt.val_folder + "training")
             output_img.save(opt.val_folder + "training/test.png")
             gt_img.save(opt.val_folder + "training/gt.png")
-    return loss_print, pic_cnt
+    return loss_print, loss_rgb_print, loss_hvi_print, pic_cnt
 
 
 def checkpoint(epoch):
@@ -121,12 +133,16 @@ def checkpoint(epoch):
     return model_out_path
 
 
-def plot_loss(epochs, losses, save_path="./weights/train/loss_graph.png"):
-    """Plot and save training loss graph."""
+def plot_loss(
+    epochs, rgb_loss, hvi_loss, total_loss, save_path="./weights/train/loss_graph.png"
+):
+    """Plot and save training loss graph with RGB, HVI, and total loss."""
     if not os.path.exists("./weights/train"):
         os.mkdir("./weights/train")
     plt.figure(figsize=(10, 6))
-    plt.plot(epochs, losses, "b-", linewidth=2, label="Training Loss")
+    plt.plot(epochs, rgb_loss, "b-", linewidth=2, label="RGB Loss")
+    plt.plot(epochs, hvi_loss, "orange", linewidth=2, label="HVI Loss")
+    plt.plot(epochs, total_loss, "g-", linewidth=2, label="Total Loss")
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
     plt.title("Training Loss Over Time")
@@ -135,6 +151,61 @@ def plot_loss(epochs, losses, save_path="./weights/train/loss_graph.png"):
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close()
     print("Loss graph saved to {}".format(save_path))
+
+
+def plot_lr(epochs, lrs, save_path="./weights/train/lr_graph.png"):
+    """Plot and save learning rate graph."""
+    if not os.path.exists("./weights/train"):
+        os.mkdir("./weights/train")
+    plt.figure(figsize=(10, 6))
+    plt.plot(epochs, lrs, "r-", linewidth=2, label="Learning Rate")
+    plt.xlabel("Epoch")
+    plt.ylabel("Learning Rate")
+    plt.title("Learning Rate Schedule")
+    plt.legend()
+    plt.grid(True)
+    plt.yscale("log")
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print("Learning rate graph saved to {}".format(save_path))
+
+
+def plot_metrics(
+    epochs,
+    psnr_list,
+    ssim_list,
+    lpips_list,
+    save_path="./weights/train/metrics_graph.png",
+):
+    """Plot and save PSNR, SSIM, LPIPS metrics graph."""
+    if not os.path.exists("./weights/train"):
+        os.mkdir("./weights/train")
+    fig, ax1 = plt.subplots(figsize=(10, 6))
+
+    # PSNR on left y-axis
+    ax1.set_xlabel("Epoch")
+    ax1.set_ylabel("PSNR (dB)", color="blue")
+    ax1.plot(epochs, psnr_list, "b-", linewidth=2, label="PSNR")
+    ax1.tick_params(axis="y", labelcolor="blue")
+
+    # SSIM and LPIPS on right y-axis
+    ax2 = ax1.twinx()
+    ax2.set_ylabel("SSIM / LPIPS", color="green")
+    ax2.plot(epochs, ssim_list, "g-", linewidth=2, label="SSIM")
+    ax2.plot(epochs, lpips_list, "r-", linewidth=2, label="LPIPS")
+    ax2.tick_params(axis="y", labelcolor="green")
+
+    # Combined legend
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc="center right")
+
+    plt.title("Validation Metrics Over Time")
+    plt.grid(True)
+    fig.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print("Metrics graph saved to {}".format(save_path))
 
 
 def load_datasets():
@@ -366,17 +437,20 @@ if __name__ == "__main__":
         os.mkdir(opt.val_folder)
 
     for epoch in range(start_epoch + 1, opt.nEpochs + start_epoch + 1):
-        epoch_loss, pic_num = train(epoch)
+        epoch_loss, epoch_rgb_loss, epoch_hvi_loss, pic_num = train(epoch)
         scheduler.step()
 
-        # Track loss for plotting
-        avg_epoch_loss = epoch_loss / pic_num
-        train_losses.append(avg_epoch_loss)
+        # Track losses and learning rate for plotting
         epoch_list.append(epoch)
+        total_losses.append(epoch_loss / pic_num)
+        rgb_losses.append(epoch_rgb_loss / pic_num)
+        hvi_losses.append(epoch_hvi_loss / pic_num)
+        learning_rates.append(optimizer.param_groups[0]["lr"])
 
         if epoch % opt.snapshots == 0:
-            # Save loss graph periodically
-            plot_loss(epoch_list, train_losses)
+            # Save loss and learning rate graphs periodically
+            plot_loss(epoch_list, rgb_losses, hvi_losses, total_losses)
+            plot_lr(epoch_list, learning_rates)
             model_out_path = checkpoint(epoch)
             norm_size = True
 
@@ -435,6 +509,14 @@ if __name__ == "__main__":
             psnr.append(avg_psnr)
             ssim.append(avg_ssim)
             lpips.append(avg_lpips)
+
+            # Track metrics for plotting
+            metrics_epochs.append(epoch)
+            psnr_list.append(avg_psnr)
+            ssim_list.append(avg_ssim)
+            lpips_list.append(avg_lpips)
+            plot_metrics(metrics_epochs, psnr_list, ssim_list, lpips_list)
+
             print(psnr)
             print(ssim)
             print(lpips)
