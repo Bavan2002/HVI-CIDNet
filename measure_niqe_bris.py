@@ -1,7 +1,7 @@
 import glob
 from tqdm import tqdm
 from PIL import Image
-import imquality.brisque as brisque
+from brisque import BRISQUE
 from loss.niqe_utils import *
 import argparse
 
@@ -12,6 +12,8 @@ eval_parser.add_argument("--MEF", action="store_true", help="output MEF dataset"
 eval_parser.add_argument("--NPE", action="store_true", help="output NPE dataset")
 eval_parser.add_argument("--VV", action="store_true", help="output VV dataset")
 ep = eval_parser.parse_args()
+
+brisque_obj = BRISQUE(url=False)
 
 
 def metrics(im_dir):
@@ -33,7 +35,7 @@ def metrics(im_dir):
 
         im1 = np.ascontiguousarray(im1)
 
-        score_brisque = brisque.score(pil_img)
+        score_brisque = brisque_obj.score(pil_img)
         score_niqe = calculate_niqe(im1)
 
         avg_brisque += score_brisque
