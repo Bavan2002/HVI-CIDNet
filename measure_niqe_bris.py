@@ -24,6 +24,13 @@ def metrics(im_dir):
 
         im1 = Image.open(item).convert("RGB")
         im1 = np.array(im1)
+
+        # Ensure image has 3 channels
+        if len(im1.shape) == 2:
+            im1 = np.stack([im1, im1, im1], axis=-1)
+        elif im1.shape[-1] != 3:
+            im1 = np.stack([im1[:, :, 0]] * 3, axis=-1)
+
         score_brisque = brisque.score(im1)
         score_niqe = calculate_niqe(im1)
 
