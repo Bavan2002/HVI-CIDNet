@@ -22,16 +22,18 @@ def metrics(im_dir):
     for item in tqdm(sorted(glob.glob(im_dir))):
         n += 1
 
-        im1 = Image.open(item).convert("RGB")
-        im1 = np.array(im1)
+        pil_img = Image.open(item).convert("RGB")
+        im1 = np.array(pil_img, dtype=np.float64)
 
-        # Ensure image has 3 channels
+        # Ensure image has 3 channels and is contiguous
         if len(im1.shape) == 2:
             im1 = np.stack([im1, im1, im1], axis=-1)
         elif im1.shape[-1] != 3:
             im1 = np.stack([im1[:, :, 0]] * 3, axis=-1)
 
-        score_brisque = brisque.score(im1)
+        im1 = np.ascontiguousarray(im1)
+
+        score_brisque = brisque.score(pil_img)
         score_niqe = calculate_niqe(im1)
 
         avg_brisque += score_brisque
