@@ -1,3 +1,10 @@
+"""
+train.py - Main training script for HVI-CIDNet
+
+Training pipeline for low-light image enhancement with dual-space loss (RGB + HVI).
+Supports multiple datasets (LOL, LOLv2, SICE, SID, FiveK) and learning rate schedulers.
+"""
+
 import os
 import torch
 import random
@@ -7,7 +14,7 @@ import torch.backends.cudnn as cudnn
 import numpy as np
 import matplotlib
 
-matplotlib.use("Agg")  # Use non-interactive backend (fixes Colab/server issues)
+matplotlib.use("Agg")  # Non-interactive backend for server/Colab
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 from net.CIDNet import CIDNet
@@ -20,13 +27,14 @@ from data.scheduler import *
 from tqdm import tqdm
 from datetime import datetime
 
-# Loss and LR tracking
-epoch_list = []
-rgb_losses = []
-hvi_losses = []
-total_losses = []
-learning_rates = []
-# Metrics tracking (for epochs with validation)
+# ===== Training History Tracking =====
+epoch_list = []  # epoch numbers
+rgb_losses = []  # RGB space loss per epoch
+hvi_losses = []  # HVI space loss per epoch
+total_losses = []  # combined loss per epoch
+learning_rates = []  # LR per epoch
+
+# Validation metrics (recorded at snapshot intervals)
 metrics_epochs = []
 psnr_list = []
 ssim_list = []
@@ -36,6 +44,7 @@ opt = option().parse_args()
 
 
 def seed_torch():
+    """Set random seeds for reproducibility across all libraries."""
     seed = random.randint(1, 1000000)
     random.seed(seed)
     np.random.seed(seed)
@@ -46,8 +55,9 @@ def seed_torch():
 
 
 def train_init():
+    """Initialize training environment: seeds, CUDA, cudnn."""
     seed_torch()
-    cudnn.benchmark = True
+    cudnn.benchmark = True  # optimize convolution algorithms
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     cuda = opt.gpu_mode
     if cuda and not torch.cuda.is_available():
@@ -55,6 +65,11 @@ def train_init():
 
 
 def train(epoch):
+    """
+    Run one training epoch.
+
+    Returns: (total_loss, rgb_loss, hvi_loss, num_samples)
+    """
     model.train()
     loss_print = 0
     loss_rgb_print = 0
@@ -64,13 +79,14 @@ def train(epoch):
     pic_last_10 = 0
     train_len = len(training_data_loader)
     iter = 0
-    torch.autograd.set_detect_anomaly(opt.grad_detect)
+    torch.autograd.set_detect_anomaly(opt.grad_detect)  # debug gradient issues
+
     for batch in tqdm(training_data_loader):
         im1, im2, path1, path2 = batch[0], batch[1], batch[2], batch[3]
-        im1 = im1.cuda()
-        im2 = im2.cuda()
+        im1 = im1.cuda()  # low-light input
+        im2 = im2.cuda()  # ground truth
 
-        # use random gamma function (enhancement curve) to improve generalization
+        # Optional: apply random gamma curve for data augmentation
         if opt.gamma:
             gamma = random.randint(opt.start_gamma, opt.end_gamma) / 100.0
             output_rgb = model(im1**gamma)
@@ -78,23 +94,32 @@ def train(epoch):
             output_rgb = model(im1)
 
         gt_rgb = im2
+
+        # Convert to HVI space for dual-space loss
         output_hvi = model.HVIT(output_rgb)
         gt_hvi = model.HVIT(gt_rgb)
+
+        # HVI space loss: L1 + SSIM + Edge + Perceptual
         loss_hvi = (
             L1_loss(output_hvi, gt_hvi)
             + D_loss(output_hvi, gt_hvi)
             + E_loss(output_hvi, gt_hvi)
             + opt.P_weight * P_loss(output_hvi, gt_hvi)[0]
         )
+
+        # RGB space loss: L1 + SSIM + Edge + Perceptual
         loss_rgb = (
             L1_loss(output_rgb, gt_rgb)
             + D_loss(output_rgb, gt_rgb)
             + E_loss(output_rgb, gt_rgb)
             + opt.P_weight * P_loss(output_rgb, gt_rgb)[0]
         )
+
+        # Total loss: RGB + weighted HVI
         loss = loss_rgb + opt.HVI_weight * loss_hvi
         iter += 1
 
+        # Gradient clipping to prevent exploding gradients
         if opt.grad_clip:
             torch.nn.utils.clip_grad_norm_(model.parameters(), 0.01, norm_type=2)
 
@@ -102,12 +127,15 @@ def train(epoch):
         loss.backward()
         optimizer.step()
 
+        # Accumulate losses for logging
         loss_print = loss_print + loss.item()
         loss_rgb_print = loss_rgb_print + loss_rgb.item()
         loss_hvi_print = loss_hvi_print + loss_hvi.item()
         loss_last_10 = loss_last_10 + loss.item()
         pic_cnt += 1
         pic_last_10 += 1
+
+        # Print stats at end of epoch
         if iter == train_len:
             print(
                 "===> Epoch[{}]: Loss: {:.4f} || Learning rate: lr={}.".format(
@@ -116,27 +144,36 @@ def train(epoch):
             )
             loss_last_10 = 0
             pic_last_10 = 0
+
+            # Save sample output for visual inspection
             output_img = transforms.ToPILImage()((output_rgb)[0].squeeze(0))
             gt_img = transforms.ToPILImage()((gt_rgb)[0].squeeze(0))
             if not os.path.exists(opt.val_folder + "training"):
                 os.mkdir(opt.val_folder + "training")
             output_img.save(opt.val_folder + "training/test.png")
             gt_img.save(opt.val_folder + "training/gt.png")
+
     return loss_print, loss_rgb_print, loss_hvi_print, pic_cnt
 
 
 def checkpoint(epoch):
-    """Save full training state including model, optimizer, scheduler, and history."""
+    """
+    Save training checkpoint including model, optimizer, scheduler, and history.
+
+    Saves two files:
+    - epoch_N.pth: model weights only (for inference)
+    - checkpoint_epoch_N.pth: full state (for resuming training)
+    """
     if not os.path.exists("./weights"):
         os.mkdir("./weights")
     if not os.path.exists("./weights/train"):
         os.mkdir("./weights/train")
 
-    # Save model weights only (for inference compatibility)
+    # Model weights only (inference)
     model_out_path = "./weights/train/epoch_{}.pth".format(epoch)
     torch.save(model.state_dict(), model_out_path)
 
-    # Save full checkpoint (for resuming training)
+    # Full checkpoint (resume training)
     full_checkpoint_path = "./weights/train/checkpoint_epoch_{}.pth".format(epoch)
     torch.save(
         {
@@ -165,7 +202,7 @@ def checkpoint(epoch):
 
 
 def load_checkpoint(model, optimizer, scheduler, checkpoint_path):
-    """Load full training state from checkpoint."""
+    """Load full training state from checkpoint for resuming training."""
     global epoch_list, rgb_losses, hvi_losses, total_losses, learning_rates
     global metrics_epochs, psnr_list, ssim_list, lpips_list
 
@@ -196,7 +233,7 @@ def load_checkpoint(model, optimizer, scheduler, checkpoint_path):
 def plot_loss(
     epochs, rgb_loss, hvi_loss, total_loss, save_path="./weights/train/loss_graph.png"
 ):
-    """Plot and save training loss graph with RGB, HVI, and total loss."""
+    """Plot RGB, HVI, and total loss curves over training."""
     if not os.path.exists("./weights/train"):
         os.mkdir("./weights/train")
     plt.figure(figsize=(10, 6))
@@ -214,7 +251,7 @@ def plot_loss(
 
 
 def plot_lr(epochs, lrs, save_path="./weights/train/lr_graph.png"):
-    """Plot and save learning rate graph."""
+    """Plot learning rate schedule (log scale)."""
     if not os.path.exists("./weights/train"):
         os.mkdir("./weights/train")
     plt.figure(figsize=(10, 6))
@@ -237,7 +274,7 @@ def plot_metrics(
     lpips_list,
     save_path="./weights/train/metrics_graph.png",
 ):
-    """Plot and save PSNR, SSIM, LPIPS metrics graph."""
+    """Plot PSNR, SSIM, LPIPS validation metrics (dual y-axis)."""
     if not os.path.exists("./weights/train"):
         os.mkdir("./weights/train")
     fig, ax1 = plt.subplots(figsize=(10, 6))
@@ -269,6 +306,11 @@ def plot_metrics(
 
 
 def load_datasets():
+    """
+    Load training and validation datasets based on command line options.
+
+    Supports: LOLv1, LOLv2-real, LOLv2-syn, LOL-blur, SID, SICE, FiveK
+    """
     print("===> Loading datasets")
     if (
         opt.lol_v1
@@ -280,6 +322,7 @@ def load_datasets():
         or opt.SICE_grad
         or opt.fivek
     ):
+        # LOLv1 dataset (485 training pairs)
         if opt.lol_v1:
             train_set = get_lol_training_set(opt.data_train_lol_v1, size=opt.cropSize)
             training_data_loader = DataLoader(
@@ -293,6 +336,7 @@ def load_datasets():
                 dataset=test_set, num_workers=opt.threads, batch_size=1, shuffle=False
             )
 
+        # LOL-blur dataset (motion blur + low-light)
         if opt.lol_blur:
             train_set = get_training_set_blur(
                 opt.data_train_lol_blur, size=opt.cropSize
@@ -308,6 +352,7 @@ def load_datasets():
                 dataset=test_set, num_workers=opt.threads, batch_size=1, shuffle=False
             )
 
+        # LOLv2-real dataset (685 real captured pairs)
         if opt.lolv2_real:
             train_set = get_lol_v2_training_set(
                 opt.data_train_lolv2_real, size=opt.cropSize
@@ -323,6 +368,7 @@ def load_datasets():
                 dataset=test_set, num_workers=opt.threads, batch_size=1, shuffle=False
             )
 
+        # LOLv2-synthetic dataset (900 synthetic pairs)
         if opt.lolv2_syn:
             train_set = get_lol_v2_syn_training_set(
                 opt.data_train_lolv2_syn, size=opt.cropSize
@@ -338,6 +384,7 @@ def load_datasets():
                 dataset=test_set, num_workers=opt.threads, batch_size=1, shuffle=False
             )
 
+        # SID (Sony) dataset - extreme low-light RAW
         if opt.SID:
             train_set = get_SID_training_set(opt.data_train_SID, size=opt.cropSize)
             training_data_loader = DataLoader(
@@ -351,6 +398,7 @@ def load_datasets():
                 dataset=test_set, num_workers=opt.threads, batch_size=1, shuffle=False
             )
 
+        # SICE dataset - multi-exposure
         if opt.SICE_mix:
             train_set = get_SICE_training_set(opt.data_train_SICE, size=opt.cropSize)
             training_data_loader = DataLoader(
@@ -377,6 +425,7 @@ def load_datasets():
                 dataset=test_set, num_workers=opt.threads, batch_size=1, shuffle=False
             )
 
+        # MIT-Adobe FiveK dataset
         if opt.fivek:
             train_set = get_fivek_training_set(opt.data_train_fivek, size=opt.cropSize)
             training_data_loader = DataLoader(
@@ -395,14 +444,25 @@ def load_datasets():
 
 
 def build_model():
+    """Initialize CIDNet model on GPU."""
     print("===> Building model ")
     model = CIDNet().cuda()
     return model
 
 
 def make_scheduler():
+    """
+    Create optimizer and learning rate scheduler.
+
+    Supports:
+    - CosineAnnealingRestartCyclicLR: two-phase cosine with different min LRs
+    - CosineAnnealingRestartLR: single cosine annealing
+    - Optional warmup phase
+    """
     optimizer = optim.Adam(model.parameters(), lr=opt.lr)
+
     if opt.cos_restart_cyclic:
+        # Two-phase: fast decay then slow decay
         if opt.start_warmup:
             scheduler_step = CosineAnnealingRestartCyclicLR(
                 optimizer=optimizer,
@@ -427,6 +487,7 @@ def make_scheduler():
                 eta_mins=[0.0002, 0.0000001],
             )
     elif opt.cos_restart:
+        # Single cosine annealing
         if opt.start_warmup:
             scheduler_step = CosineAnnealingRestartLR(
                 optimizer=optimizer,
@@ -453,6 +514,15 @@ def make_scheduler():
 
 
 def init_loss():
+    """
+    Initialize loss functions with configured weights.
+
+    Loss components:
+    - L1: pixel-wise absolute difference (weight=1.0)
+    - D (SSIM): structural similarity (weight=0.5)
+    - E (Edge): Laplacian edge loss (weight=50.0)
+    - P (Perceptual): VGG feature loss (weight=0.01)
+    """
     L1_weight = opt.L1_weight
     D_weight = opt.D_weight
     E_weight = opt.E_weight
@@ -462,49 +532,45 @@ def init_loss():
     D_loss = SSIM(weight=D_weight).cuda()
     E_loss = EdgeLoss(loss_weight=E_weight).cuda()
     P_loss = PerceptualLoss(
-        {"conv1_2": 1, "conv2_2": 1, "conv3_4": 1, "conv4_4": 1},
+        {"conv1_2": 1, "conv2_2": 1, "conv3_4": 1, "conv4_4": 1},  # VGG layers
         perceptual_weight=P_weight,
         criterion="mse",
     ).cuda()
     return L1_loss, P_loss, E_loss, D_loss
 
 
+# ===== Main Training Loop =====
 if __name__ == "__main__":
-    """
-    preparision
-    """
+    # Initialize
     train_init()
     training_data_loader, testing_data_loader = load_datasets()
     model = build_model()
     optimizer, scheduler = make_scheduler()
     L1_loss, P_loss, E_loss, D_loss = init_loss()
 
-    """
-    train
-    """
+    # Metrics tracking
     psnr = []
     ssim = []
     lpips = []
     start_epoch = 0
 
-    # Load full checkpoint if resuming training
+    # Resume from checkpoint if specified
     if opt.start_epoch > 0:
         checkpoint_path = f"./weights/train/checkpoint_epoch_{opt.start_epoch}.pth"
         if os.path.exists(checkpoint_path):
             start_epoch = load_checkpoint(model, optimizer, scheduler, checkpoint_path)
-            # Restore psnr/ssim/lpips lists from metrics history
             psnr = psnr_list.copy()
             ssim = ssim_list.copy()
             lpips = lpips_list.copy()
         else:
-            # Fallback to loading model weights only (old checkpoint format)
+            # Fallback: load model weights only (old checkpoint format)
             print("Full checkpoint not found, loading model weights only...")
             pth = f"./weights/train/epoch_{opt.start_epoch}.pth"
             model.load_state_dict(
                 torch.load(pth, map_location=lambda storage, loc: storage)
             )
             start_epoch = opt.start_epoch
-            # Advance scheduler to match the epoch we're resuming from
+            # Advance scheduler to match resumed epoch
             print(f"Advancing scheduler to epoch {start_epoch}...")
             for _ in range(start_epoch):
                 scheduler.step()
@@ -515,25 +581,26 @@ if __name__ == "__main__":
     if not os.path.exists(opt.val_folder):
         os.mkdir(opt.val_folder)
 
+    # Training loop
     for epoch in range(start_epoch + 1, opt.nEpochs + 1):
         epoch_loss, epoch_rgb_loss, epoch_hvi_loss, pic_num = train(epoch)
         scheduler.step()
 
-        # Track losses and learning rate for plotting
+        # Track losses and learning rate
         epoch_list.append(epoch)
         total_losses.append(epoch_loss / pic_num)
         rgb_losses.append(epoch_rgb_loss / pic_num)
         hvi_losses.append(epoch_hvi_loss / pic_num)
         learning_rates.append(optimizer.param_groups[0]["lr"])
 
+        # Periodic validation and checkpointing
         if epoch % opt.snapshots == 0:
-            # Save loss and learning rate graphs periodically
             plot_loss(epoch_list, rgb_losses, hvi_losses, total_losses)
             plot_lr(epoch_list, learning_rates)
             model_out_path = checkpoint(epoch)
             norm_size = True
 
-            # LOL three subsets
+            # Set output folder and GT path based on dataset
             if opt.lol_v1:
                 output_folder = "LOLv1/"
                 label_dir = opt.data_valgt_lol_v1
@@ -543,12 +610,9 @@ if __name__ == "__main__":
             if opt.lolv2_syn:
                 output_folder = "LOLv2_syn/"
                 label_dir = opt.data_valgt_lolv2_syn
-
-            # LOL-blur dataset with low_blur and high_sharp_scaled
             if opt.lol_blur:
                 output_folder = "LOL_blur/"
                 label_dir = opt.data_valgt_lol_blur
-
             if opt.SID:
                 output_folder = "SID/"
                 label_dir = opt.data_valgt_SID
@@ -561,12 +625,12 @@ if __name__ == "__main__":
                 output_folder = "SICE_grad/"
                 label_dir = opt.data_valgt_SICE_grad
                 norm_size = False
-
             if opt.fivek:
                 output_folder = "fivek/"
                 label_dir = opt.data_valgt_fivek
                 norm_size = False
 
+            # Run evaluation
             im_dir = opt.val_folder + output_folder + "*.png"
             eval(
                 model,
@@ -579,6 +643,7 @@ if __name__ == "__main__":
                 alpha=0.8,
             )
 
+            # Compute metrics
             avg_psnr, avg_ssim, avg_lpips = metrics(
                 im_dir, label_dir, use_GT_mean=False
             )
@@ -601,6 +666,7 @@ if __name__ == "__main__":
             print(lpips)
         torch.cuda.empty_cache()
 
+    # Save final training report
     now = datetime.now().strftime("%Y-%m-%d-%H%M%S")
     with open(f"./results/training/metrics{now}.md", "w") as f:
         f.write("dataset: " + output_folder + "\n")
